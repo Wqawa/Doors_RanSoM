@@ -41,8 +41,14 @@ namespace face {
     // 停牌闪现（头隐藏，只有停牌）—— 旧接口，保留兼容，主流程不再用。
     void ShowStopSign(DWORD lifeMs);
 
-    // 开场 jumpscare（张口脸 + 深红底）。先小后大 + 抖动 + 白处闪红。
-    void ShowAttackStill(DWORD lifeMs);
+    // 开场 jumpscare（张口脸 + 深红底）。抖动 + 白处闪红 + 尺寸变化。
+    //
+    // smallToBig = true （默认）：先按停牌大小显示 kAttackSmallMs（100ms），
+    //                            再瞬间跳到全屏 —— 开场那个"停牌炸开成脸"。
+    // smallToBig = false        ：直接全屏，跳过那 100ms 的小尺寸。
+    //                            给惩罚跳杀用 —— 玩家已经等了 90 秒，
+    //                            再来一遍"小→大"像是在重播开场。
+    void ShowAttackStill(DWORD lifeMs, bool smallToBig = true);
 
     // 惩罚 jumpscare（张口脸，不铺底）。同样先小后大 + 抖动 + 白处闪红。
     void ShowAttackShaking(DWORD lifeMs);

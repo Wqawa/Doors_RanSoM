@@ -945,11 +945,21 @@ namespace {
         if (a->anim.useScale)
             scale = a->anim.fromScale + (a->anim.toScale - a->anim.fromScale) * e;
 
-        const BYTE alpha = (BYTE)(a->anim.fromAlpha +
-            (a->anim.toAlpha - a->anim.fromAlpha) * e);
+        // alpha 必须夹到 [0,255] 再转 BYTE。
+        //
+        // back-out / 回弹这类缓动的 e 会过冲到约 1.12，
+        // 直接 (BYTE) 强转会**模 256 溢出**：
+        //   打开动画 110 + (255-110)*1.1208 = 272 → (BYTE)272 = 16
+        // 于是 alpha 走 110 → 255 → 16 → 255，
+        // 画面表现就是"弹到最大时突然变近乎全透明，下一帧又弹回来"——
+        // 也就是动画末尾闪的那一下。
+        float af = (float)a->anim.fromAlpha +
+            ((float)a->anim.toAlpha - (float)a->anim.fromAlpha) * e;
+        if (af < 0.0f)   af = 0.0f;
+        if (af > 255.0f) af = 255.0f;
+        const BYTE alpha = (BYTE)af;
 
-        PaintWindow(a, scale, alpha, a->anim.anchorX, a->anim.anchorY);
-
+        PaintWindow(a, scale, alpha, a->anim.anchorX, a->anim.anchorY); 
         // 注意用 tRaw 判断结束：分帧后 t 在最后一格也会等于 1，但用原始进度更直观。
         if (tRaw >= 1.0f)
         {
@@ -1130,6 +1140,11 @@ namespace {
             if (PtInRect(&a->rcClose, pt))
             {
                 elog::Write(L"[aero] 关闭按钮被点击: '%s'", a->opt.title.c_str());
+                // 先通知上层「这是玩家主动关的」，再发 WM_CLOSE。
+                // 顺序不能反：WM_CLOSE 会一路走到 StartClose，中间可能
+                // 触发别的处理，先把标志立起来才最可靠。
+                if (a->opt.onUserClose)
+                    a->opt.onUserClose(hwnd, a->opt.onUserCloseUser);
                 SendMessageW(hwnd, WM_CLOSE, 0, 0);
             }
             else if (PtInRect(&a->rcMax, pt))
@@ -1196,6 +1211,13 @@ namespace {
             {
                 if (a->anim.type == ANIM_CLOSE) return 0;
                 CancelAnim(a);
+
+                // 从系统菜单 / Alt+F4 走来的「关闭」也算玩家主动关。
+                // 注意：aero::AnimateClose() 走的是 WM_CLOSE，**不经过这里**，
+                // 所以「到寿命自动淡出」不会被误判。
+                if (a->opt.onUserClose)
+                    a->opt.onUserClose(hwnd, a->opt.onUserCloseUser);
+
                 if (a->minimized) { DestroyWindow(hwnd); return 0; }
                 StartClose(a);
                 return 0;
@@ -1271,9 +1293,15 @@ namespace {
         case WM_SIZE:
             if (a && wp != SIZE_MINIMIZED)
             {
+                // 动画期间直接返回：那几帧的位置/尺寸本来就在动，
+                // OnAnimTick 下一帧会自己补上。在这里插一脚只会得到
+                // 一帧全透明 —— EnsureBuffer 若因尺寸变化重建了 DIB，
+                // 重建后的 bits 还没画过，直接呈现就是一片空白。
+                if (a->anim.active) return 0;
+
                 RECT wr; GetWindowRect(hwnd, &wr);
                 EnsureBuffer(a, wr.right - wr.left, wr.bottom - wr.top);
-                if (!a->anim.active) PaintWindow(a);
+                PaintWindow(a);
             }
             return 0;
 
@@ -1371,11 +1399,18 @@ namespace aero {
         }
 
         // 先按打开动画的初始状态画一帧，再显示，避免出现瞬间全尺寸的闪烁
+        // 先启动动画状态，再用动画起点画首帧，最后才显示窗口。
+        //
+        // 顺序很要紧：ShowWindow 可能触发 WM_SIZE，而 WM_SIZE 里会检查
+        // anim.active —— 如果此刻动画还没开始，它就会按「最终尺寸 + 全不透明」
+        // 重画一帧，于是先闪一下完整窗口、再缩回去重播打开动画。
+        // 把 StartOpen 提到 ShowWindow 之前，anim.active 已是 true，
+        // 那一帧误绘自然被跳过。
         if (opt.animate)
         {
+            StartOpen(a);
             PaintWindow(a, animcfg::kOpenScale, animcfg::kOpenAlpha);
             ShowWindow(a->hwnd, SW_SHOWNOACTIVATE);
-            StartOpen(a);
         }
         else
         {
@@ -1383,7 +1418,6 @@ namespace aero {
             ShowWindow(a->hwnd, SW_SHOWNOACTIVATE);
             SetTimer(a->hwnd, kTickId, a->opt.tickMs, nullptr);
         }
-
         g_windows.push_back(a);
         return a->hwnd;
     }

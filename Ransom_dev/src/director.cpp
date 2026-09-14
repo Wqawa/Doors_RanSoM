@@ -49,7 +49,7 @@ namespace {
     const DWORD kCatchLeadMs = kJumpscareMs + kLoadMs + kFinishMs;
     const DWORD kCaughtMs = 90000;   // 原作就是 90 秒
     const DWORD kPaidMs = 4800;    // 要盖住 popup 那套付钱演出的全长（约 4.4 秒）
-    const DWORD kPunishMs = 4000;
+    const DWORD kPunishMs = 2200;
 
     const DWORD kCooldownPaidMs = 11000;
     const DWORD kCooldownPunishMs = 13000;
@@ -57,6 +57,11 @@ namespace {
     // 倒计时剩这么多的时候进入收尾：叠加播放 Ransom_encounter（riser），
     // **同时**主题曲开始线性渐隐。
     const DWORD kRiserLeadMs = 15000;
+
+    // 玩家每主动关掉一个勒索子窗口，勒索倒计时往前扣这么多。
+    // 这是给玩家的一条「别干等着」的出路 —— 也可以主动关窗口拖到超时，
+    // 关 9 个就直接触发没付清的跳杀。
+    const DWORD kChildCloseCreditMs = 10000;
 
     // 全屏纯色底的配色
     const COLORREF kCenterVeil = RGB(0, 0, 0);
@@ -86,6 +91,11 @@ namespace {
     bool         g_riserFired = false;
     int          g_fadeLogged = 101;
 
+    // 玩家关子窗口累积的「提前量」。RansomElapsedMs() 会把它加到已过
+    // 时间上，所以倒计时、渐隐、riser、超时判定全都自动跟着走。
+    // 每一轮被抓（PHASE_CAUGHT 进入）时清零。
+    DWORD        g_timeCreditMs = 0;
+
     DWORD        g_idleMs = kIdleMs;
     DWORD        g_pendingIdleMs = kIdleMs;
 
@@ -93,7 +103,12 @@ namespace {
     {
         const DWORD begin = g_caughtAt + kCatchLeadMs;
         const DWORD now = GetTickCount();
-        return (now <= begin) ? 0 : (now - begin);
+        const DWORD el = (now <= begin) ? 0 : (now - begin);
+
+        // 加上玩家关子窗口攒下的提前量。
+        // DWORD 溢出不是问题：每次最多 10 秒、子窗口上限 14 个，
+        // 满打满算也就 140 秒，离 DWORD 上限差着几个数量级。
+        return el + g_timeCreditMs;
     }
 
     void EnterPhase(director::Phase p);
@@ -205,6 +220,7 @@ namespace {
             g_caughtAt = GetTickCount();
             g_ransomBegun = false;
             g_loadShown = false;
+            g_timeCreditMs = 0;            // 每一轮从头攒
             face::ShowAttackStill(kJumpscareMs);
             audio::PlayCaught();
             break;
@@ -231,7 +247,7 @@ namespace {
             fx::SetSolid(false);
             fx::SetNoise(0);
             fx::SetEdgeGlow(false);
-            face::ShowAttack(kPunishMs);
+            face::ShowAttackStill(kPunishMs, false); 
             audio::PlayHit();
             audio::SetGlitchBed(0);
             audio::SetTheme(false);
@@ -298,6 +314,27 @@ namespace {
             elog::Write(L"[director] 加载结束，进入勒索阶段");
         }
 
+        // 玩家关掉了子窗口？每关一个，倒计时往前扣 10 秒。
+        // 放在 SetStatus 之前：这样同一帧里 SetStatus 看到的 remain
+        // 就已经减过了，窗口上的时间显示不会慢一拍。
+        if (g_phase == director::PHASE_CAUGHT && g_ransomBegun)
+        {
+            const int n = popup::ConsumePlayerClosedCount();
+            if (n > 0)
+            {
+                const DWORD credit = (DWORD)n * kChildCloseCreditMs;
+                g_timeCreditMs += credit;
+
+                // 音乐也跟着往前跳，维持和倒计时的同步。
+                // 不这么做的话主题曲会继续按真实时间慢慢播，
+                // 玩家一关窗口就会发现"音乐和倒计时对不上了"。
+                audio::SeekThemeBy((double)credit / 1000.0);
+
+                elog::Write(L"[director] 玩家关闭 %d 个子窗口，倒计时提前 %d 秒（累计提前 %.1f 秒）",
+                    n, n * (int)(kChildCloseCreditMs / 1000),
+                    g_timeCreditMs / 1000.0);
+            }
+        }
         if (g_phase == director::PHASE_CAUGHT && g_ransomBegun)
             popup::SetStatus(g_gold, kGoldGoal, director::RansomRemainMs(), kCaughtMs);
 

@@ -149,6 +149,11 @@ namespace {
     // 所以两样都核对：窗口还在，而且进程号没变。
     int RestoreAll()
     {
+        // 记下当前前台窗口——恢复完之后要把焦点还回去。
+        // 有些 UWP 应用即使收到"不激活"的显示请求，也会在自己的
+        // 激活回调里调 SetForegroundWindow 抢前台，这里最后再压一下。
+        HWND prevForeground = GetForegroundWindow();
+
         int done = 0;
         for (size_t i = 0; i < g_locked.size(); ++i)
         {
@@ -163,9 +168,30 @@ namespace {
             // 免得把人家的窗口在散场瞬间又跳一下。
             if (!IsIconic(h)) continue;
 
-            ShowWindowAsync(h, SW_RESTORE);
+            // 用 SW_SHOWNOACTIVATE 而不是 SW_RESTORE。
+            //
+            // SW_RESTORE 会把窗口恢复**并激活到前台**——恢复被收走的
+            // 那批窗口时，最后一个被恢复的会"弹"到屏幕上。如果它是
+            // UWP 应用（计算器 / 设置 / 照片 / 应用商店……），视觉上
+            // 和「这个程序被打开了」一模一样，用户会以为是本程序干的。
+            // 这就是"退出时随机打开一个 UWP 应用"的来源。
+            //
+            // SW_SHOWNOACTIVATE 只把窗口从最小化恢复成普通状态、
+            // **不抢焦点**，观感上只是任务栏那个按钮从按下变回弹起，
+            // 屏幕上一个窗口都不会闪出来。
+            ShowWindowAsync(h, SW_SHOWNOACTIVATE);
             ++done;
         }
+
+        // 个别 UWP 应用即使收到 SW_SHOWNOACTIVATE 也会自己抢前台
+        // （它们的激活逻辑是异步的，不受这个 nCmdShow 约束）。
+        // 把焦点还给恢复之前那个窗口，压住它们。
+        if (prevForeground && IsWindow(prevForeground) &&
+            GetForegroundWindow() != prevForeground)
+        {
+            SetForegroundWindow(prevForeground);
+        }
+
         return done;
     }
 

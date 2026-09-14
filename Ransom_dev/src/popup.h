@@ -44,6 +44,10 @@ void SetStatus(int gold, int goal, DWORD remainMs, DWORD totalMs);
 
 bool MainAlive();
 int  Children();
+// 累计「玩家主动关掉的子窗口」个数，并清零。
+// director 每帧调一次，用于把勒索倒计时往前推 —— 每关一个子窗口扣 10 秒。
+// **寿命到了自动淡出的窗口不计入**。
+int ConsumePlayerClosedCount();
 int  TotalSpawned();
 
 } // namespace popup

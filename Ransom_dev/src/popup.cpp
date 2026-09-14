@@ -103,11 +103,29 @@ namespace {
     struct Child {
         HWND      hwnd = nullptr;
         bool      closing = false;   // 正在淡出，等窗口销毁后回收
+        bool      playerClosed = false;  // 玩家主动点关闭按钮关的（要扣倒计时）
         ChildData data;
     };
     // 用指针数组而不是对象数组：窗口回调持有 &data 的指针，
     // 如果存对象，vector::erase 搬移元素会让这些指针全部错位。
     std::vector<Child*> g_children;
+        // 玩家主动关闭子窗口的次数。director 每帧用 ConsumePlayerClosedCount()
+    // 消费它。
+    //
+    // 不用原子：回调、ReapDeadChildren、ConsumePlayerClosedCount 全都在
+    // 主线程（驱动窗口的定时器回调）里跑，不存在并发。
+    int g_playerClosedCount = 0;
+
+    // aero 的 onUserClose 回调 —— 玩家点了子窗口的关闭按钮。
+    // 这里**只置位**，真正的计数在 ReapDeadChildren 里做：等窗口动画
+    // 真的走完、窗口销毁了才算数，免得动画还没放完就开始扣时间。
+    void OnChildCloseClick(HWND /*hwnd*/, void* user)
+    {
+        Child* c = (Child*)user;
+        if (!c) return;
+        c->playerClosed = true;
+        elog::Write(L"[popup] 玩家点了子窗口的关闭按钮（将扣 10 秒）");
+    }
 
     // 主窗口状态
     int   g_gold = 0;
@@ -284,6 +302,12 @@ namespace {
         opt.topmost = true;
         opt.resizable = false;         // 子窗口不做边缘缩放，免得玩的时候误拖
         opt.animate = true;            // 开关窗都走缩放淡入淡出
+
+        // 玩家主动点关闭按钮 -> OnChildCloseClick -> 打标记 -> 稍后扣倒计时。
+        // user 传的是 Child*（不是 &c->data —— paint 回调用的是 &c->data，
+        // 两个 user 是分开的，互不干扰）。
+        opt.onUserClose = &OnChildCloseClick;
+        opt.onUserCloseUser = c;
         // 子窗口开得多（同时最多 14 个），重绘间隔要放宽，
         // 否则消息循环被重绘压满，窗口动画会被饿住。
         // 100ms 对雪花/故障这种内容来说反而更像「信号不良」。
@@ -340,7 +364,11 @@ namespace {
         {
             if (!aero::IsAlive(g_children[i]->hwnd))
             {
-                // 玩家点关闭按钮关掉了它
+                // 玩家**主动**关的（playerClosed）才计入扣时间；
+                // 寿命到了自动淡出的不算。
+                if (g_children[i]->playerClosed)
+                    ++g_playerClosedCount;
+
                 delete g_children[i];
                 g_children.erase(g_children.begin() + i);
                 continue;
@@ -652,9 +680,14 @@ namespace popup {
         g_remain = remainMs;
         g_totalMs = totalMs;
     }
-
     bool MainAlive() { return aero::IsAlive(g_main); }
     int  Children() { return (int)g_children.size(); }
     int  TotalSpawned() { return g_total; }
 
+    int ConsumePlayerClosedCount()
+    {
+        const int n = g_playerClosedCount;
+        g_playerClosedCount = 0;
+        return n;
+    }
 } // namespace popup

@@ -61,6 +61,19 @@ void PlaySuccess();                // 赎回成功（ransom_success.ogg）
 // 常驻层归零 + 停掉所有声部。
 void Silence();
 
+// 把主题曲的播放位置往前（负值则往后）跳 seconds 秒。
+//
+// 用于让音乐和玩家加速过的倒计时保持同步：玩家每关一个勒索子窗口，
+// director 会扣倒计时，同时调这个让音乐往前跳相应的时长。
+//
+// 跳变本身会造成波形不连续（咔哒一声），所以内部会先归零增益，
+// 再用约 34ms 淡入盖住。**底噪层（glitch bed）不受影响**。
+//
+// 若跳变后超出曲长：
+//   * 主题曲会停在末尾不再循环（这一轮的音乐就结束了）
+//   * 下一次 SetTheme(true) 会把它复位
+void SeekThemeBy(double seconds);
+
 // 把若干秒的实际混音渲染成 WAV（开发时验证素材确实出声）。
 // 需要先 Start()。渲染结束后会把状态复位。
 bool DumpMix(const wchar_t* path, int seconds);

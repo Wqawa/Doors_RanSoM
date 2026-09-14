@@ -26,18 +26,31 @@
 namespace aero {
 
 struct Options {
-    std::wstring title;
-    int  width   = 420;
-    int  height  = 260;
-    int  x       = CW_USEDEFAULT;   // 屏幕坐标（含阴影外扩）
-    int  y       = CW_USEDEFAULT;
-    bool buttons = true;            // 是否显示 最小化/最大化/关闭
-    bool topmost = true;
-    bool resizable = true;          // 边缘可拖拽缩放
-    bool animate = true;            // 开/关/最大化/还原/最小化 动画
-    UINT tickMs = 33;               // 静止时的内容重绘间隔。
-                                    // 窗口开得多的时候要调大，否则消息循环被
-                                    // 重绘压满，动画定时器会被饿住（实测延迟近 200ms）
+        std::wstring title;
+        int  width = 420;
+        int  height = 260;
+        int  x = CW_USEDEFAULT;   // 屏幕坐标（含阴影外扩）
+        int  y = CW_USEDEFAULT;
+        bool buttons = true;            // 是否显示 最小化/最大化/关闭
+        bool topmost = true;
+        bool resizable = true;          // 边缘可拖拽缩放
+        bool animate = true;            // 开/关/最大化/还原/最小化 动画
+        UINT tickMs = 33;               // 静止时的内容重绘间隔。
+        // 窗口开得多的时候要调大，否则消息循环被
+        // 重绘压满，动画定时器会被饿住（实测延迟近 200ms）
+
+// 玩家**主动**要求关闭窗口时（点右上角 X 按钮，或系统菜单 / Alt+F4
+// 里的「关闭」）回调。用途：勒索子窗口要区分「玩家关的」和
+// 「寿命到了自己淡出的」—— 前者要扣倒计时，后者不扣。
+//
+// 回调发生在真正开始淡出动画**之前**，此时窗口仍然有效。
+// 从 popup 那边调 `aero::AnimateClose()` 触发的关闭**不会**走这个
+// 回调（那条路走的是 WM_CLOSE，跟玩家点关闭按钮的路不同），
+// 所以「到寿命自动淡出」不会被误判成玩家关闭。
+//
+// 传 nullptr 表示不关心。
+        void (*onUserClose)(HWND hwnd, void* user) = nullptr;
+        void* onUserCloseUser = nullptr;
 };
 
 // 内容绘制回调。

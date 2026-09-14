@@ -1004,10 +1004,48 @@ struct DragLatch {
     POINT origin = { 0, 0 };
 };
 DragLatch              g_dragLatch;             // 钩子回调里访问，单线程，不用锁
-
 // 右键菜单拦截的总开关。正常演出时一直开着，
 // 留 --no-block-menu 是为了排查「按键没反应」这类问题时能一键排除本模块。
 bool                   g_blockContextMenu = true;
+
+// 光标下面到底是不是桌面图标区？
+//
+// 低层鼠标钩子是**全局**的：用户可能在别的窗口（打开的文件夹、
+// 浏览器、终端……）里操作，那个窗口如果正好和某个「已加密」方框
+// 在屏幕坐标上重叠，光看坐标是分不出来的 —— 不查一下就会把
+// 别人窗口里的右键菜单、左键点击也一并吞掉。
+//
+// 判断方式：取光标下最顶层的窗口，看它是不是桌面列表视图
+// （SysListView32）本身或它的后代。是才算「在桌面上」。
+//
+// 注意 WindowFromPoint 会跳过 WS_EX_TRANSPARENT 的窗口，
+// 所以我们的覆盖层、fx 层、face 层都不会出现在返回结果里 ——
+// 光标在桌面上时拿到的就是 SysListView32 或 Progman/WorkerW。
+bool PointOnDesktop(POINT pt)
+{
+    HWND under = WindowFromPoint(pt);
+    if (!under) return false;
+
+    // 兜底：万一某些环境下 WindowFromPoint 没跳过我们的覆盖层
+    // （它是 layered + transparent，按文档应被跳过），直接认它。
+    // 覆盖层贴在桌面之上、普通窗口之下，它可见时能拿到，
+    // 说明光标确实在桌面这一层。
+    if (under == g_hwnd) return true;
+
+    // 桌面图标都挂在 SysListView32 上：往上找它。
+    // 最多走 4 级（SysListView32 -> SHELLDLL_DefView -> Progman/WorkerW），
+    // 足够覆盖所有已知的桌面结构。
+    if (g_desktop.hListView)
+    {
+        HWND h = under;
+        for (int i = 0; i < 4 && h; ++i)
+        {
+            if (h == g_desktop.hListView) return true;
+            h = GetParent(h);
+        }
+    }
+    return false;
+}
 
 // 命中判定：点是不是落在某个「已加密」图标上。
 //
@@ -1016,11 +1054,15 @@ bool                   g_blockContextMenu = true;
 // 会跟着漂走，明明点在图标上却漏判。绘制要抖，判定要稳，两套矩形分开存。
 bool PointInLockedFrame(POINT pt)
 {
+    // 先确认光标确实落在桌面上 —— 否则别的窗口上随便一个点，
+    // 只要屏幕坐标碰巧和某个锁定方框重叠，就会被误拦。
+    // 这是「在打开的文件夹里点右键时被吞掉」的根因。
+    if (!PointOnDesktop(pt)) return false;
+
     for (size_t i = 0; i < g_hitRects.size(); ++i)
         if (PtInRect(&g_hitRects[i], pt)) return true;
     return false;
 }
-
 // 「现在该不该拦」。只有已加密(LOOK_LOCKED) + 开关打开时才拦。
 inline bool BlockingNow()
 {

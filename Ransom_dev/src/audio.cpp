@@ -93,6 +93,18 @@ namespace {
     // ------------------------------------------------------------ 声部 ----
     const int kMaxOneShots = 8;
 
+        // 主题曲跳变后的淡入时长（采样帧）。约 34ms @ 44100Hz。
+    // 纯粹为了盖住跳变点波形不连续产生的咔哒声——这个时长足够短，
+    // 听感上不会被当成"音乐断了一下"。
+    const int kThemeSeekFadeFrames = 1500;
+
+    // 主题曲跳变请求的通道（主线程 -> 合成线程）。
+    // 和 g_req / g_themeRestart 同一套无锁模式：主线程只递增计数，
+    // 合成线程看到计数变了才去动 pos / gain。
+    std::atomic<int>  g_themeSeekReq{ 0 };
+    int               g_themeSeekSeen = 0;
+    std::atomic<long> g_themeSeekDeltaFrames{ 0 };
+
     // 循环层：增益平滑过渡，避免开关时爆音
     struct LoopLayer {
         int    clipId = -1;
@@ -100,20 +112,51 @@ namespace {
         double gain = 0.0;
         double target = 0.0;
 
+        // 播到末尾是否回绕。主题曲默认循环；被 SeekThemeBy 往前跳过
+        // 一次之后翻成 false —— 因为主题曲本来就是 90 秒对应 90 秒倒计时，
+        // 玩家把倒计时扣到 0 就意味着这一轮音乐也该结束了，
+        // 再循环会盖住后面的惩罚音效。
+        bool loop = true;
+
+        // SeekThemeBy 之后的淡入：还剩多少采样帧。
+        // >0 时由 Sample() 按线性插值把 gain 从 0 拉回 target，
+        // Tick() 在这段时间里不插手（否则两边会打架）。
+        int  fadeInLeft = 0;
+
         void Tick()
         {
+            if (fadeInLeft > 0) return;   // 淡入由 Sample 管
             gain += (target - gain) * 0.00025;
             if (gain < 0.0001 && target == 0.0) gain = 0.0;
         }
 
         double Sample()
         {
-            if (clipId < 0 || gain <= 0.0) return 0.0;
+            if (clipId < 0) return 0.0;
+
+            // ---- 跳变淡入 ----
+            // 必须在 gain 检查之前递减：gain 可能是 0，也得让计数走。
+            if (fadeInLeft > 0)
+            {
+                --fadeInLeft;
+                gain = target * (1.0 - (double)fadeInLeft / (double)kThemeSeekFadeFrames);
+                if (gain < 0.0) gain = 0.0;
+            }
+
+            if (gain <= 0.0) return 0.0;
             const audio_clip::Clip& c = g_clips[clipId];
             if (!c.Ok()) return 0.0;
 
+            // 走到末尾：这一层停播（loop=false 时）。
+            if (pos >= c.Frames())
+            {
+                if (!loop) return 0.0;
+                pos = 0;
+            }
+
             const double v = (c.pcm[pos] / 32768.0) * gain;
-            if (++pos >= c.Frames()) pos = 0;
+            ++pos;
+            if (loop && pos >= c.Frames()) pos = 0;
             return v;
         }
     };
@@ -193,7 +236,48 @@ namespace {
         // ---- 主题曲重头播：每一轮勒索都从 0 秒起，和 90 秒倒计时对齐 ----
         {
             const int cur = g_themeRestart.load();
-            if (g_themeRestartSeen != cur) { g_themeRestartSeen = cur; g_theme.pos = 0; }
+            if (g_themeRestartSeen != cur)
+            {
+                g_themeRestartSeen = cur;
+                g_theme.pos = 0;
+                g_theme.loop = true;      // 新的一轮，恢复循环
+                g_theme.fadeInLeft = 0;   // 清掉可能残留的淡入计数
+            }
+        }
+
+        // ---- 主题曲跳变：玩家关子窗口时倒计时被扣，音乐跟着往前跳 ----
+        {
+            const int cur = g_themeSeekReq.load();
+            if (g_themeSeekSeen != cur)
+            {
+                g_themeSeekSeen = cur;
+
+                const long delta = g_themeSeekDeltaFrames.load();
+                const audio_clip::Clip& c = g_clips[g_theme.clipId];
+                if (c.Ok())
+                {
+                    long long p = (long long)g_theme.pos + (long long)delta;
+                    const long long len = (long long)c.Frames();
+
+                    // 前跳超过曲长：停在末尾。这一轮的音乐到此为止 ——
+                    // 倒计时都已经归零了，音乐也该结束。
+                    // 往后跳（负 delta）不可能小于 0，因为 pos 是累加过的
+                    // 实际位置，delta 只会是在它基础上加。
+                    if (p >= len)
+                    {
+                        p = len;
+                        g_theme.loop = false;
+                    }
+                    if (p < 0) p = 0;
+
+                    g_theme.pos = (size_t)p;
+
+                    // 归零增益，让 Sample() 在 kThemeSeekFadeFrames 帧内
+                    // 把它拉回 target —— 盖住波形不连续造成的咔哒声。
+                    g_theme.gain = 0.0;
+                    g_theme.fadeInLeft = kThemeSeekFadeFrames;
+                }
+            }
         }
 
         for (int i = 0; i < n; ++i)
@@ -461,6 +545,22 @@ namespace audio {
         g_theme.target = 0.0;
         g_bed.target = 0.0;
         for (int i = 0; i < kMaxOneShots; ++i) g_shots[i].active = false;
+    }
+
+    void SeekThemeBy(double seconds)
+    {
+        // 没启动音频（--no-audio / 无声卡）：什么都不做。
+        // 这里**不**报"主题曲未载入"那类日志 —— 静默降级是设计的一部分。
+        if (!g_hwo) return;
+
+        const long frames = (long)(seconds * kSampleRate);
+        if (frames == 0) return;
+
+        g_themeSeekDeltaFrames.store(frames);
+        ++g_themeSeekReq;
+
+        elog::Write(L"[audio] 主题曲位置跳变 %+.2f 秒（约 %ld 帧）",
+            seconds, frames);
     }
 
     // ---------------------------------------------------------------- 导出 ----
